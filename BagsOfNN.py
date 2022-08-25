@@ -45,8 +45,8 @@ class BagOfNeuralNet(nn.Module):
         self.loss_history = []
         for ii in range(num_of_iterations): 
             optimizer.zero_grad()
-            phi = self.forward(scaled_X_train)
-            loss = nnloss(phi,scaled_y_train)
+            phi = self.forward(x)
+            loss = nnloss(phi,y)
             self.loss_history.append(loss.item())
             loss.backward()
             optimizer.step()

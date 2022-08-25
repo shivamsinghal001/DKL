@@ -4,8 +4,8 @@ import pickle
 import argparse
 import torch
 from sklearn.preprocessing import StandardScaler
-from sklearn.externals.joblib import dump
-
+import joblib
+from joblib import dump
 
 def coverage(y, yhat, sigma):
     count_vec = [(x1 <= x2 + x3) & (x1 >= x2 - x3) for x1, x2, x3 in zip(y, yhat, sigma)]

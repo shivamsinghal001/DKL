@@ -1,14 +1,24 @@
 import pickle
 import argparse
-from sklearn.externals.joblib import load
+import joblib
+from joblib import load
 from sklearn import metrics
-import numpy
+import numpy as np
 import sys
 import time
+import torch
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, RationalQuadratic
+from sklearn.gaussian_process.kernels import RBF, RationalQuadratic, WhiteKernel, ConstantKernel, ExpSineSquared
+from sklearn import linear_model
+from sklearn.utils import resample
 import xgboost as xgb
 import BagsOfNN
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
+import pickle
+
+viridis = cm.get_cmap('viridis', 256)
 
 def coverage(y, yhat, sigma):
     count_vec = [(x1 <= x2 + x3) & (x1 >= x2 - x3) for x1, x2, x3 in zip(y, yhat, sigma)]
@@ -29,6 +39,8 @@ def plot_uncertainty(mean, std, X_train, X_test, y_train, y_test, title, name):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description='')
+  parser.add_argument('--kernel_rank', type=int, default=2,
+                      help='Rank of the kernel')
   parser.add_argument('--load_model', type=str, default='models/',
                       help='directory to load the model')
   parser.add_argument('--load_data', type=str, default='data/',
@@ -48,20 +60,20 @@ if __name__ == "__main__":
   scaled_y_train = data_dict_scaled['scaled_y_train']
   scaled_X_test = data_dict_scaled['scaled_X_test']
 
-  feature_scalar = load('feature_scalar.bin')
-  label_scalar = load('label_scalar.bin')
+  feature_scalar = load(args.load_data + 'feature_scalar.bin')
+  label_scalar = load(args.load_data + 'label_scalar.bin')
 
   R2 = {}
   explained_var = {}
   MSE = {}
   MAE = {}
   inference_times = {}
-  coverage = {}
+  coverage_metric = {}
   sizes = {}
 
   #DKL Evaluation
-  DKL = torch.load(args.load_model+'dklnet.h')
-  DKL.eval()
+  dklnet = torch.load(args.load_model+'dklnet.h')
+  dklnet.eval()
   phi,sigma = dklnet(scaled_X_test)
   R = phi.size()[1]
 
@@ -86,7 +98,7 @@ if __name__ == "__main__":
 
   mtx = (phi@phi.t()).detach().numpy()
 
-  plot_uncertainty(mean_lindkl, std_lindkl, X_train, X_test, y_train, y_test, 'DKL', args.savefig+'DKL_syn1_fit.jpg')
+  plot_uncertainty(mean_lindkl, std_lindkl, X_train, X_test, y_train, y_test, 'DKL', args.save_fig+'DKL_syn1_fit.jpg')
 
   min_val = min(X_test)[0]
   max_val = max(X_test)[0]
@@ -103,10 +115,11 @@ if __name__ == "__main__":
   explained_var['DKL'] = metrics.explained_variance_score(y_test, mean_lindkl)
   MSE['DKL'] = metrics.mean_squared_error(y_test, mean_lindkl)
   MAE['DKL'] = metrics.mean_absolute_error(y_test, mean_lindkl)
-  coverage['DKL'] = coverage(y_test.flatten(), 
+  coverage_metric['DKL'] = coverage(y_test.flatten(), 
                      mean_lindkl.flatten(), 
                      std_lindkl.flatten())
   sizes['DKL'] = sys.getsizeof(dklnet)
+  print('DKL evaluation done!')
 
   #Lasso Evaluation
   lasso = linear_model.LassoCV().fit(scaled_X_train.detach().numpy(), scaled_y_train.detach().numpy().reshape(-1,))
@@ -122,9 +135,10 @@ if __name__ == "__main__":
   explained_var['Lasso'] = metrics.explained_variance_score(y_test, mean_LASSO)
   MSE['Lasso'] = metrics.mean_squared_error(y_test, mean_LASSO)
   MAE['Lasso'] = metrics.mean_absolute_error(y_test, mean_LASSO)
-  coverage['Lasso'] = coverage(y_test.flatten(), mean_LASSO.flatten(), 
+  coverage_metric['Lasso'] = coverage(y_test.flatten(), mean_LASSO.flatten(), 
                      np.std(y_train) * np.array([1.] * len(y_test)))
   sizes['Lasso'] = sys.getsizeof(lasso)
+  print('Lasso evaluation done!')
 
   #Bags of NN Evaluation
   num_bag_nn = 10
@@ -137,7 +151,7 @@ if __name__ == "__main__":
       scaled_X_train_bt = torch.from_numpy(scaled_X_train_bt).float()
       scaled_y_train_bt = torch.from_numpy(scaled_y_train_bt).float()
     
-      nnet = BagsOfNN.BagOfNeuralNet(scaled_X_train_bt.shape[1], rank_of_kernel) 
+      nnet = BagsOfNN.BagOfNeuralNet(scaled_X_train_bt.shape[1], args.kernel_rank) 
       nnet.fit(scaled_X_train_bt, scaled_y_train_bt, num_of_iterations)
       bag_of_nn.append(nnet)
 
@@ -155,14 +169,15 @@ if __name__ == "__main__":
   std_BNN = np.std(y_pred_list, axis = 0)
   std_BNN[std_BNN <= 0.1 * np.std(y_train)] = 0.1 * np.std(y_train)
 
-  plot_uncertainty(mean_BNN, std_BNN, X_train, X_test, y_train, y_test, 'Bags of NN', args.savefig+'BagOfNN_syn1_fit.jpg')
+  plot_uncertainty(mean_BNN, std_BNN, X_train, X_test, y_train, y_test, 'Bags of NN', args.save_fig+'BagOfNN_syn1_fit.jpg')
 
   R2['bag'] = metrics.r2_score(y_test, mean_BNN)
   explained_var['bag'] = metrics.explained_variance_score(y_test, mean_BNN)
   MSE['bag'] = metrics.mean_squared_error(y_test, mean_BNN)
   MAE['bag'] = metrics.mean_absolute_error(y_test, mean_BNN)
-  coverage['bag'] = coverage(y_test.flatten(), mean_BNN.flatten(), std_BNN.flatten())
+  coverage_metric['bag'] = coverage(y_test.flatten(), mean_BNN.flatten(), std_BNN.flatten())
   sizes['bag'] = sys.getsizeof(bag_of_nn)
+  print('Bags of NN evaluation done!')
 
   #Mixture of Gaussians
   k1 = 66.0**2 * RBF(length_scale=67.0)  
@@ -182,14 +197,15 @@ if __name__ == "__main__":
   infer_time = end_time - start_time
   inference_times['GP'] = infer_time
 
-  plot_uncertainty(mean_GP, std_GP, X_train, X_test, y_train, y_test, 'GP', args.savefig+'GP_syn1_fit.jpg')
+  plot_uncertainty(mean_GP, std_GP, X_train, X_test, y_train, y_test, 'GP', args.save_fig+'GP_syn1_fit.jpg')
 
   R2['GP'] = metrics.r2_score(y_test, mean_GP)
   explained_var['GP'] = metrics.explained_variance_score(y_test, mean_GP)
   MSE['GP'] = metrics.mean_squared_error(y_test, mean_GP)
   MAE['GP'] = metrics.mean_absolute_error(y_test, mean_GP)
-  coverage['GP'] = coverage(y_test.flatten(), mean_GP.flatten(), std_GP.flatten())
+  coverage_metric['GP'] = coverage(y_test.flatten(), mean_GP.flatten(), std_GP.flatten())
   sizes['GP'] = sys.getsizeof(GaussianProcessRegressor)
+  print('GP evaluation done!')
 
   #XGBOOST
   num_bag_xgb = 10
@@ -218,11 +234,15 @@ if __name__ == "__main__":
   mean_XGB = np.mean(y_pred_list, axis=0)
   std_XGB = np.std(y_pred_list, axis = 0)
 
-  plot_uncertainty(mean_XGB, std_XGB, X_train, X_test, y_train, y_test, 'XGB', args.savefig+'XGB_syn1_fit.jpg')
+  plot_uncertainty(mean_XGB, std_XGB, X_train, X_test, y_train, y_test, 'XGB', args.save_fig+'XGB_syn1_fit.jpg')
 
   R2['XGB'] = metrics.r2_score(y_test, mean_XGB)
   explained_var['XGB'] = metrics.explained_variance_score(y_test, mean_XGB)
   MSE['XGB'] = metrics.mean_squared_error(y_test, mean_XGB)
   MAE['XGB'] = metrics.mean_absolute_error(y_test, mean_XGB)
-  coverage['XGB'] = coverage(y_test.flatten(), mean_XGB.flatten(), std_XGB.flatten())
+  coverage_metric['XGB'] = coverage(y_test.flatten(), mean_XGB.flatten(), std_XGB.flatten())
   sizes['XGB'] = sys.getsizeof(bag_of_xgb)
+  print('XGBoost evaluation done!')
+
+  data = {'R2':R2, 'explained_var':explained_var, 'MSE':MSE, 'MAE':MAE, 'coverage':coverage_metric, 'sizes':sizes, 'inference_times':inference_times}
+  pickle.dump(data, open(args.save_fig+'stats.p', "wb" ))
